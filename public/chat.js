@@ -1,6 +1,6 @@
 // Complete PhytoBot frontend script
 // Handles local chat storage, sidebar, edit/delete, memory, and robust image analysis
-// Integrated with Phytelix model worker system
+// Integrated with PhytoSense model worker system
 
 // UI elements
 const chatListEl = document.getElementById('chatList');
@@ -15,12 +15,13 @@ const saveMemBtn = document.getElementById('saveMem');
 const renameBtn = document.getElementById('renameBtn');
 const deleteChatBtn = document.getElementById('deleteChat');
 
-// Supabase chat state (replaces localStorage)
-const CHAT_STATE_TABLE = 'chat_state';
+// localStorage keys
+const STORAGE_KEY = 'phytobot_chats_v1';
+const DEMO_MODE_KEY = 'phytobot_demo_mode';
 
-// Phytelix integration constants
-const MODEL_WORKER = 'https://phytelix-models.31babajidi.workers.dev';
-const TREATMENT_API = 'https://phytelix-ai-model.31babajidi.workers.dev/';
+// PhytoSense integration constants
+const MODEL_WORKER = 'https://phytosense-models.31babajidi.workers.dev';
+const TREATMENT_API = 'https://phytosense-ai-model.31babajidi.workers.dev/';
 
 // In-memory state
 let chats = []; // {id,title, messages: [{role,content,id}], memory, useMemory}
@@ -60,35 +61,33 @@ function escapeHtml(str) {
 }
 
 // Chat management
-async function loadChats(){
+function loadChats(){
   try{
-    const sb = await (window.PhytoSupabase && window.PhytoSupabase.initSupabase());
-    if (!sb) throw new Error('Supabase not ready');
-    const { data: { user } } = await sb.auth.getUser();
-    if (!user) { chats = []; activeId = null; return; }
-    const { data, error } = await sb.from(CHAT_STATE_TABLE).select('data').eq('user_id', user.id).maybeSingle();
-    if (!error && data && data.data) {
-      const state = data.data;
-      chats = Array.isArray(state.chats) ? state.chats : [];
-      activeId = state.activeId || (chats[0] && chats[0].id) || null;
-      isDemoMode = Boolean(state.demoMode);
-    }
-  }catch(e){ console.warn('loadChats', e); }
-  if(!chats || !chats.length){
+    const raw = localStorage.getItem(STORAGE_KEY);
+    chats = raw ? JSON.parse(raw) : [];
+  }catch(e){console.warn('loadChats',e); chats = []}
+  if(!chats.length){
     const id = uid('chat');
-    chats = [{ id, title:'New chat', messages:[{ id:uid('m'), role:'assistant', content:"Hello! I'm PhytoBot, your crop disease assistant. You can:\n• Ask questions about plant diseases\n• Upload images for analysis\n• Get treatment recommendations\n\nHow can I help you today?" }], memory:'', useMemory:false }];
+    chats.push({
+      id,
+      title:'New chat',
+      messages:[{
+        id:uid('m'),
+        role:'assistant',
+        content:"Hello! I'm PhytoBot, your crop disease assistant. You can:\n• Ask questions about plant diseases\n• Upload images for analysis\n• Get treatment recommendations\n\nHow can I help you today?"
+      }], 
+      memory:'', 
+      useMemory:false
+    });
     activeId = id;
-    await saveChats();
+    saveChats();
+  } else {
+    activeId = chats[0].id;
   }
 }
 
-async function saveChats(){
-  try{
-    const sb = await (window.PhytoSupabase && window.PhytoSupabase.initSupabase()); if(!sb) return;
-    const { data: { user } } = await sb.auth.getUser(); if(!user) return;
-    const state = { chats, activeId, demoMode: isDemoMode };
-    await sb.from(CHAT_STATE_TABLE).upsert({ user_id: user.id, data: state, updated_at: new Date().toISOString() });
-  }catch(e){ console.warn('saveChats', e); }
+function saveChats(){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(chats)); }catch(e){console.warn('saveChats',e);} 
   renderChatList();
 }
 
@@ -208,21 +207,20 @@ function toggleMemory(){
 }
 
 // Demo Mode
-async function loadDemoMode(){
-try{
-  await loadChats(); // isDemoMode hydrated from chat_state
-  }catch{}
+function loadDemoMode(){
+  const saved = localStorage.getItem(DEMO_MODE_KEY);
+  isDemoMode = saved === 'true';
 }
- 
+
 function renderDemoModeUI(){
-const demoToggle = document.getElementById('demoToggle');
+  const demoToggle = document.getElementById('demoToggle');
   if(demoToggle) demoToggle.textContent = isDemoMode ? 'On' : 'Off';
 }
- 
-async function toggleDemoMode(){
-isDemoMode = !isDemoMode;
-await saveChats();
-renderDemoModeUI();
+
+function toggleDemoMode(){
+  isDemoMode = !isDemoMode;
+  localStorage.setItem(DEMO_MODE_KEY, isDemoMode.toString());
+  renderDemoModeUI();
   showToast(`Demo mode ${isDemoMode ? 'enabled' : 'disabled'}`);
 }
 
@@ -257,16 +255,35 @@ async function loadModelUrls() {
   }
 }
 
-// Usage tracking helpers (via Supabase profiles)
-async function checkRemainingAnalyses() {
+// Usage tracking helpers
+async function checkRemainingAnalyses(user_id = 'anonymous') {
+  if (isDemoMode) return 999; // Unlimited in demo mode
+  
   try {
-    if (window.PhytoIntegrations && window.PhytoIntegrations.getPlanAndRemaining) {
-      const info = await window.PhytoIntegrations.getPlanAndRemaining();
-      return info ? info.remaining : null;
-    }
-    return null;
+    const res = await fetch(`${MODEL_WORKER}/usage?user_id=${encodeURIComponent(user_id)}`);
+    if (!res.ok) return null;
+    const j = await res.json();
+    return typeof j.remaining_analyses === 'number' ? j.remaining_analyses : null;
   } catch (e) {
     console.error('checkRemainingAnalyses error', e);
+    return null;
+  }
+}
+
+async function decrementUsage(user_id = 'anonymous') {
+  if (isDemoMode) return 999;
+  
+  try {
+    const res = await fetch(`${MODEL_WORKER}/usage/decrement`, {
+      method: 'POST', 
+      headers: { 'Content-Type': 'application/json' }, 
+      body: JSON.stringify({ user_id })
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return typeof j.remaining_analyses === 'number' ? j.remaining_analyses : null;
+  } catch (e) {
+    console.error('decrementUsage error', e);
     return null;
   }
 }
@@ -405,7 +422,7 @@ async function handleChatImageUpload(ev){
       const base64 = await fileToDataUrl(file);
 
       // Analyze the image
-      const detection = await analyzeImageWithPhytelix(base64);
+      const detection = await analyzeImageWithPhytoSense(base64);
 
       // Build assistant message content
       let assistantText = buildAnalysisResponse(detection);
@@ -490,7 +507,7 @@ async function loadTeachableMachineModel(modelType) {
   }
 }
 
-async function analyzeImageWithPhytelix(base64Data) {
+async function analyzeImageWithPhytoSense(base64Data) {
   // Get selected crop model
   const cropSelect = document.getElementById('crop-model-select');
   const selectedCrop = cropSelect ? cropSelect.value : 'autodetect';
@@ -647,15 +664,17 @@ async function fetchTreatmentFromModel(disease, crop){
 
 async function handleUsageDecrement() {
   try {
-    if (window.PhytoIntegrations && typeof window.PhytoIntegrations.decrementAnalysis === 'function') {
-      const result = await window.PhytoIntegrations.decrementAnalysis();
-      if (result && result.ok) {
-        const el = document.getElementById('analysesLeft');
-        if (el && result.remaining !== undefined && result.remaining !== Infinity) el.textContent = String(result.remaining);
-        if (result.remaining !== Infinity) {
-          if (result.remaining <= 0) showToast('Analysis limit reached. Consider upgrading your account.');
-          else if (result.remaining <= 5) showToast(`${result.remaining} analyses remaining.`);
-        }
+    const currentUser = localStorage.getItem('phytosense_current_user') || 'anonymous';
+    const remaining = await decrementUsage(currentUser);
+    
+    if (remaining !== null) {
+      const el = document.getElementById('analysesLeft');
+      if (el) el.textContent = String(remaining);
+      
+      if (remaining <= 0) {
+        showToast('Analysis limit reached. Consider upgrading your account.');
+      } else if (remaining <= 5) {
+        showToast(`${remaining} analyses remaining.`);
       }
     }
   } catch (e) {
@@ -687,61 +706,6 @@ function attachEventListeners() {
 
   const imageUploadChat = document.getElementById('image-upload-chat');
   if(imageUploadChat) imageUploadChat.addEventListener('change', handleChatImageUpload);
-
-  // Profile inputs (Supabase upload + Firebase profile save)
-  const profileNameEl = document.getElementById('profileName');
-  const profileImageUploadEl = document.getElementById('profileImageUpload');
-
-  if (profileImageUploadEl) {
-    profileImageUploadEl.addEventListener('change', async (e) => {
-      const files = e.target.files;
-      if (!files || files.length === 0) return;
-      const file = files[0];
-      const name = profileNameEl && profileNameEl.value ? profileNameEl.value.trim() : 'anonymous';
-      const userId = name || 'anonymous';
-
-      showToast('Uploading profile image...');
-
-      try {
-        if (window.PhytoSupabase && window.PhytoSupabase.uploadProfileImage) {
-          const publicUrl = await window.PhytoSupabase.uploadProfileImage(userId, file);
-          if (publicUrl) {
-            if (window.PhytoIntegrations && window.PhytoIntegrations.saveProfileToSupabase) {
-              await window.PhytoIntegrations.saveProfileToSupabase({ username: name, avatarUrl: publicUrl });
-              try { await window.PhytoIntegrations.saveProfileToFirebase({ username: name, avatarUrl: publicUrl }); } catch {}
-              showToast('Profile saved.');
-            } else {
-              showToast('Uploaded avatar, but profile save not configured.');
-            }
-          } else {
-            showToast('Failed to upload avatar to Supabase.');
-          }
-        } else {
-          showToast('Supabase not configured. Please add `config.js`.');
-        }
-      } catch (err) {
-        console.error('Profile upload error', err);
-        showToast('Failed to upload profile image.');
-      }
-    });
-  }
-
-  if (profileNameEl) {
-  profileNameEl.addEventListener('change', async () => {
-  const name = profileNameEl.value ? profileNameEl.value.trim() : '';
-  if (!name) return;
-  try {
-    if (window.PhytoIntegrations && window.PhytoIntegrations.saveProfileToSupabase) {
-    await window.PhytoIntegrations.saveProfileToSupabase({ username: name });
-    try { await window.PhytoIntegrations.saveProfileToFirebase({ username: name }); } catch {}
-  showToast('Profile name saved.');
-  }
-  } catch (err) {
-  console.error('Save profile name error', err);
-    showToast('Failed to save profile name.');
-  }
-  });
-  }
 }
 
 // Initialize application
@@ -789,8 +753,7 @@ function populateCropSelector() {
     { value: 'cacao', label: 'Cacao/Cocoa' },
     { value: 'guava', label: 'Guava' },
     { value: 'apple', label: 'Apple' },
-    { value: 'banana', label: 'Banana' },
-    { value: 'orange', label: 'Orange' },
+    { value: 'banana', label: 'Banana' }
   ];
   
   cropOptions.forEach(option => {
